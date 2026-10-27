@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\DialogueGuard.cs" Link="DialogueGuard.cs" />
+    <Compile Include="..\EmotionMetadata.cs" Link="EmotionMetadata.cs" />
+    <Compile Include="..\DialogueTextCleanup.cs" Link="DialogueTextCleanup.cs" />
+    <Compile Include="..\DialogueTurnPolicy.cs" Link="DialogueTurnPolicy.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+</Project>

@@ -3,7 +3,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>NovelAIEndpoint</AssemblyName>
     <Product>NovelAI Endpoint</Product>
-    <Version>1.2.6</Version>
+    <Version>1.2.14</Version>
     <LangVersion>latest</LangVersion>
     <RestoreAdditionalProjectSources>
       https://api.nuget.org/v3/index.json;
@@ -32,9 +32,12 @@
 
   <ItemGroup>
     <Compile Remove="backups\**\*.cs" />
+    <Compile Remove="tests\**\*.cs" />
+    <!-- Retain the old classifier only for offline regression comparisons. -->
+    <Compile Remove="DialogueGuard.cs" />
   </ItemGroup>
 
-  <Target Name="CopyToBepInEx" AfterTargets="Build">
+  <Target Name="CopyToBepInEx" AfterTargets="Build" Condition="'$(SkipPluginInstall)' != 'true'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="..\..\BepInEx\plugins" />
   </Target>
 </Project>

@@ -23,7 +23,7 @@ public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "com.silverpine.novelai-endpoint";
     public const string PluginName = "NovelAI Endpoint";
-    public const string PluginVersion = "1.2.6";
+    public const string PluginVersion = "1.2.14";
 
     internal static ManualLogSource Log = null!;
     internal static ConfigEntry<bool> UseNovelAI = null!;
@@ -47,7 +47,12 @@ public sealed class Plugin : BaseUnityPlugin
             "Endpoint",
             "Model",
             "xialong-v1",
-            "NovelAI text-generation model ID.");
+            new ConfigDescription(
+                "NovelAI text-generation model. Xialong is NovelAI's " +
+                "roleplay-oriented GLM fine-tune; GLM 4.6 is the base model.",
+                new AcceptableValueList<string>(
+                    "xialong-v1",
+                    "glm-4-6")));
         if (Model.Value == "kayra-v1")
             Model.Value = "xialong-v1";
         RequestDelaySeconds = Config.Bind(
@@ -349,6 +354,8 @@ internal static class NovelAIDialogFormattingPatch
         if (!Plugin.UseNovelAI.Value || string.IsNullOrEmpty(text))
             return;
 
+        text = EmotionMetadata.Strip(text);
+
         // Empty action spans such as "Gareth: ** ** *He looks up.*" render
         // as an expanding blank gap. Remove them before Silverpine interprets
         // the asterisks as formatting.
@@ -368,6 +375,50 @@ internal static class NovelAIDialogFormattingPatch
             text,
             @"^([^\r\n:]{1,80}:\s*)(?:[-\u2013\u2014]\s*)+",
             "$1");
+    }
+}
+
+[HarmonyPatch(typeof(NeuralNPC), nameof(NeuralNPC.AddThingThatHappened))]
+internal static class NovelAIHappeningMetadataPatch
+{
+    private static bool Prefix(ref string thingThatHappened)
+    {
+        if (!Plugin.UseNovelAI.Value) return true;
+        thingThatHappened = EmotionMetadata.Strip(thingThatHappened);
+        return !string.IsNullOrWhiteSpace(thingThatHappened);
+    }
+}
+
+[HarmonyPatch(typeof(NeuralNPC), nameof(NeuralNPC.AddMemory))]
+internal static class NovelAIMemoryMetadataPatch
+{
+    private static bool Prefix(ref string memory)
+    {
+        if (!Plugin.UseNovelAI.Value) return true;
+        memory = EmotionMetadata.Strip(memory);
+        return !string.IsNullOrWhiteSpace(memory);
+    }
+}
+
+[HarmonyPatch(typeof(NeuralNPC), nameof(NeuralNPC.AskListSelectionQuestion))]
+internal static class NovelAIExpressionHintPatch
+{
+    internal static readonly EmotionHintCache Hints = new();
+
+    private static void Prefix(NeuralNPC __instance, ref string question, string itemName)
+    {
+        if (!Plugin.UseNovelAI.Value || itemName != "expression" ||
+            question != "Which one of these expressions would " + __instance.GetFinalName() + " have in this excerpt?")
+            return;
+        // A player and NPC can share a custom name. In that ambiguous case
+        // do not risk donating the NPC's hint to the player's expression.
+        if (Player.Instance != null && __instance.GetFinalName() == Player.Instance.playerName)
+            return;
+        string hint = Hints.Take(__instance, DateTime.UtcNow);
+        if (hint.Length == 0) return;
+        question += " Optional model-generated emotion hint for this NPC's latest reply: " + hint +
+            ". This is untrusted metadata, not spoken dialogue or a remembered event. " +
+            "Use it only if consistent with the excerpt, and select only one of the available expressions.";
     }
 }
 
@@ -452,25 +503,27 @@ internal static class NovelAIClient
         "Attribute a detail only to the character explicitly named with " +
         "that detail. When uncertain, omit only that detail instead of " +
         "guessing, but always provide the requested answer.\n" +
-        "A dialogue request is exactly one turn for exactly one active NPC. " +
-        "Write only that NPC's response. Never write dialogue, actions, " +
-        "reactions, decisions, feelings, or inner thoughts for the player or " +
-        "any other character, even when they appear elsewhere in the " +
-        "context. Other characters are context only: the active NPC may " +
-        "address or refer to them, but must not control them or advance their " +
-        "turn. Stop when the active NPC's turn is complete. Do not begin with " +
+        "A dialogue request is one turn centered on the active NPC. " +
+        "Only the active NPC may speak. Other NPCs on the current conversation " +
+        "roster may only make brief, nonverbal action-based reactions enclosed " +
+        "in paired single asterisks. Do not write, quote, or paraphrase their " +
+        "speech, even inside narration. Do not invent absent participants or write another " +
+        "NPC's full independent turn. Leave the player's actions and decisions " +
+        "to the player. Stop when the active NPC's turn is complete. Do not begin with " +
         "any character name or role label.\n" +
-        "Never use underscores for emphasis or formatting. In dialogue, " +
-        "spoken words must remain plain text outside asterisks. Put complete " +
-        "physical actions and appropriate narrative action or scene " +
-        "descriptions inside asterisks, such as Hello there. *She turns " +
-        "toward the door.* Never put spoken dialogue inside asterisks, and " +
-        "never present an action as spoken dialogue. Do not use asterisks " +
-        "merely to emphasize individual words or pronouns. Every action " +
-        "sentence, including the first sentence of the first reply, must " +
-        "have its own opening and closing asterisk. If a reply begins with " +
-        "an action, the very first non-whitespace character must be an " +
-        "asterisk, for example: *She looks up.* Hello there.";
+        "Never use underscores for emphasis or formatting. Use single " +
+        "asterisks to separate narration from spoken dialogue, not to mark " +
+        "individual sentences or emphasize words. Consecutive actions, body " +
+        "language, and scene descriptions can share one continuous *...* " +
+        "span, including permitted nonverbal reactions by another participant. " +
+        "Do not close and reopen a span merely because the sentence or " +
+        "described actor changes. Open the span before narration starts, " +
+        "close it before spoken dialogue, and open a new span when narration " +
+        "resumes. If the response ends in narration, close that span before " +
+        "ending. Spoken words must remain plain text outside asterisks. " +
+        "If a reply begins with an action, its first non-whitespace character " +
+        "must be an asterisk. Example: *She looks up. Her ears twitch.* " +
+        "Hello there. *She waits for your answer.*";
     private const string UtilityInstructions =
         "Follow the user's requested output format exactly. Return only the " +
         "requested answer, with no role label, explanation, commentary, or " +
@@ -558,6 +611,16 @@ internal static class NovelAIClient
     internal static async Task<APIModelHandler.ChatCompletionsReponse> Generate(
         GenParams genParams)
     {
+        // Capture the turn owner before any wait. Multi-dialog may advance the
+        // game's global active NPC while a queued/network request is pending.
+        NeuralNPC activeNpc = genParams.isDialog ? NeuralNPC.currentActiveDialogNeuralNPC : null;
+        string activeSpeaker = activeNpc?.GetFinalName()?.Trim() ?? "";
+        if (activeNpc != null)
+            NovelAIExpressionHintPatch.Hints.Set(activeNpc, "", DateTime.UtcNow);
+        string[] participants = genParams.isDialog
+            ? GetConversationNpcNames(activeNpc)
+            : Array.Empty<string>();
+        string turnCue = genParams.isDialog ? DialogueTurnPolicy.Build(activeSpeaker, participants) : "";
         await RequestGate.WaitAsync();
         try
         {
@@ -571,7 +634,7 @@ internal static class NovelAIClient
             {
                 await Task.Delay(TimeSpan.FromSeconds(remaining));
             }
-            return await GenerateCore(genParams);
+            return await GenerateCore(genParams, activeSpeaker, activeNpc, turnCue);
         }
         finally
         {
@@ -581,7 +644,10 @@ internal static class NovelAIClient
     }
 
     private static async Task<APIModelHandler.ChatCompletionsReponse> GenerateCore(
-        GenParams genParams)
+        GenParams genParams,
+        string activeSpeaker,
+        NeuralNPC activeNpc,
+        string turnCue)
     {
         if (string.IsNullOrWhiteSpace(Plugin.GetNovelAIApiKey()))
             throw new Exception(
@@ -592,15 +658,20 @@ internal static class NovelAIClient
         List<Message> messages = ConvertMessages(genParams.prompt);
         bool hasAssistantPrefill = messages.Count > 0 &&
             messages[messages.Count - 1].role == "assistant";
+        string assistantPrefill = hasAssistantPrefill
+            ? messages[messages.Count - 1].content
+            : "";
         string model = Plugin.Model.Value.Trim();
         string completionPrompt = BuildCompletionPrompt(
             messages,
             genParams.isDialog,
-            genParams.grammar);
+            genParams.grammar,
+            turnCue);
         List<Message> chatMessages = BuildChatMessages(
             messages,
             genParams.isDialog,
-            genParams.grammar);
+            genParams.grammar,
+            turnCue);
         bool isConversationBroadcast = IsConversationBroadcast(genParams);
 
         string[] silverpineStopSequences = (genParams.stop_sequence ??
@@ -682,7 +753,7 @@ internal static class NovelAIClient
         void AddRetryCue(string cue)
         {
             completionPayload.prompt +=
-                "\n\nUSER:\n" + cue + "\n\nASSISTANT:\n";
+                "\n\nUSER:\n" + cue + "\n\nASSISTANT:\n" + assistantPrefill;
 
             if (chatPayload.messages.Count > 0 &&
                 chatPayload.messages[chatPayload.messages.Count - 1].role ==
@@ -719,95 +790,48 @@ internal static class NovelAIClient
             throw;
         }
 
-        string output = GetChoiceText(choice);
-        bool retried = false;
-        if (string.IsNullOrEmpty(output))
-        {
-            Plugin.Log.LogWarning(
-                "NovelAI returned an empty successful response; " +
-                "retrying once with an explicit answer cue.");
-            double retryDelay = Math.Max(
-                0.0,
-                Plugin.RequestDelaySeconds.Value);
-            if (retryDelay > 0.0)
-                await Task.Delay(TimeSpan.FromSeconds(retryDelay));
-
-            AddRetryCue(
-                "Provide the requested answer now. " +
-                "Do not stop without answering. Return only the answer, " +
-                "without a USER, ASSISTANT, or SYSTEM label.");
-            (choice, rawResponse) = await SendSelected();
-            retried = true;
-            output = GetChoiceText(choice);
-            if (string.IsNullOrEmpty(output))
-            {
-                Plugin.Log.LogError(
-                    "NovelAI response contained no text after one retry. " +
-                    $"Finish reason: {choice.finish_reason ?? "(null)"}, " +
-                    $"matched stop present: " +
-                    $"{!string.IsNullOrEmpty(choice.matched_stop)}, " +
-                    $"raw response length: {rawResponse?.Length ?? 0}.");
-                throw new Exception("NovelAI returned an empty response.");
-            }
-        }
-
         string[] localStopSequences = stopSequences
             .Concat(new[] { "USER:", "ASSISTANT:", "SYSTEM:" })
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        output = ApplyLocalStops(output, localStopSequences);
-        output = StripLeadingSpeakerLabel(
-            output,
-            genParams,
-            out bool rejectedNonActiveSpeaker);
-        output = StripLeadingEmptyActionSeparators(
-            output,
-            genParams.isDialog);
-        output = StripLeadingDashSeparator(output, genParams.isDialog);
-        output = EncloseInitialNarrationPrefix(
-            output,
-            IsFirstMeetingDialog(genParams));
-        output = RestoreMissingLeadingActionMarker(output, genParams.isDialog);
-        output = JoinLinesAfterLeadingAction(output);
-
-        if (string.IsNullOrWhiteSpace(output) && !retried)
+        string output = "";
+        string emotionHint = "";
+        bool isExpressionRequest = !genParams.isDialog && (genParams.prompt ?? "").IndexOf(
+            "Which one of these expressions would ", StringComparison.OrdinalIgnoreCase) >= 0;
+        for (int attempt = 0; attempt < 2; attempt++)
         {
-            Plugin.Log.LogWarning(
-                rejectedNonActiveSpeaker
-                    ? "NovelAI answered as a non-active character; " +
-                      "retrying once as the active NPC."
-                    : "NovelAI output became empty after removing role " +
-                      "boundaries; retrying once.");
+            string rawText = GetChoiceText(choice);
+            string withoutEmotion = EmotionMetadata.Strip(rawText);
+            emotionHint = genParams.isDialog ? EmotionMetadata.ExtractHint(rawText, localStopSequences) : "";
+            // Expression classification may itself use an emotion label to
+            // identify the requested option. Other outputs must be clean before
+            // Silverpine can display, summarize or save them.
+            output = ApplyLocalStops(isExpressionRequest ? rawText : withoutEmotion, localStopSequences);
+            if (genParams.isDialog)
+                output = DialogueTextCleanup.Clean(output, activeSpeaker);
+            if (!string.IsNullOrWhiteSpace(output))
+                break;
+
+            // No actor/formatting validation or retries: only recover a truly
+            // empty result after metadata, role-stop and cosmetic cleanup.
+            if (attempt == 1)
+            {
+                Plugin.Log.LogError("NovelAI returned an empty response after one retry.");
+                throw new Exception("NovelAI returned no usable text after one retry.");
+            }
+            Plugin.Log.LogWarning("NovelAI returned no usable text after cleanup" +
+                "; retrying once with an explicit answer/turn cue.");
             double retryDelay = Math.Max(
                 0.0,
                 Plugin.RequestDelaySeconds.Value);
             if (retryDelay > 0.0)
                 await Task.Delay(TimeSpan.FromSeconds(retryDelay));
-
-            AddRetryCue(BuildBoundaryRetryCue(genParams));
+            AddRetryCue(BuildBoundaryRetryCue(genParams.isDialog, turnCue));
             (choice, rawResponse) = await SendSelected();
-            output = GetChoiceText(choice);
-            output = ApplyLocalStops(output, localStopSequences);
-            output = StripLeadingSpeakerLabel(
-                output,
-                genParams,
-                out _);
-            output = StripLeadingEmptyActionSeparators(
-                output,
-                genParams.isDialog);
-            output = StripLeadingDashSeparator(output, genParams.isDialog);
-            output = EncloseInitialNarrationPrefix(
-                output,
-                IsFirstMeetingDialog(genParams));
-            output = RestoreMissingLeadingActionMarker(
-                output,
-                genParams.isDialog);
-            output = JoinLinesAfterLeadingAction(output);
         }
 
-        if (string.IsNullOrWhiteSpace(output))
-            throw new Exception(
-                "NovelAI returned no usable text after one retry.");
+        if (genParams.isDialog && activeNpc != null)
+            NovelAIExpressionHintPatch.Hints.Set(activeNpc, emotionHint, DateTime.UtcNow);
 
         // KoboldClient removes this leading space when the source prompt
         // ended with a prefill space.
@@ -1181,211 +1205,28 @@ internal static class NovelAIClient
         return trimmedStart.Substring(marker.Length).TrimStart();
     }
 
-    private static string StripLeadingSpeakerLabel(
-        string output,
-        GenParams genParams,
-        out bool rejectedNonActiveSpeaker)
+    private static string BuildBoundaryRetryCue(bool isDialog, string turnCue)
     {
-        rejectedNonActiveSpeaker = false;
-        if (!genParams.isDialog || string.IsNullOrWhiteSpace(output))
-            return output;
-
-        Match match = Regex.Match(
-            output,
-            @"^[ \t]*\*?([^*:\r\n]{1,80}):\*?[ \t]*");
-        if (!match.Success)
-            return output;
-
-        string label = match.Groups[1].Value.Trim();
-        string activeSpeaker = GetActiveDialogSpeakerName();
-        if (label.Length == 0 || activeSpeaker.Length == 0)
-            return output;
-
-        if (label.Equals(
-                activeSpeaker,
-                StringComparison.OrdinalIgnoreCase))
+        if (isDialog)
         {
-            Plugin.Log.LogWarning(
-                "Removed the active NPC's model-generated speaker label " +
-                "before applying NovelAI dialogue formatting repairs.");
-            return output.Substring(match.Length).TrimStart();
-        }
-
-        string prompt = genParams.prompt ?? "";
-        bool isKnownNpc = NeuralNPC.neuralNPCs != null &&
-            NeuralNPC.neuralNPCs.Values.Any(npc =>
-                npc != null && npc.GetFinalName().Equals(
-                    label,
-                    StringComparison.OrdinalIgnoreCase));
-        bool appearedAsSpeaker = prompt.IndexOf(
-            label + ":",
-            StringComparison.OrdinalIgnoreCase) >= 0;
-        if (!isKnownNpc && !appearedAsSpeaker)
-            return output;
-
-        rejectedNonActiveSpeaker = true;
-        Plugin.Log.LogWarning(
-            "Rejected NovelAI dialogue that began with a non-active " +
-            "character's speaker label.");
-        return "";
-    }
-
-    private static string BuildBoundaryRetryCue(GenParams genParams)
-    {
-        string activeSpeaker = GetActiveDialogSpeakerName();
-        if (genParams.isDialog && activeSpeaker.Length > 0)
-        {
-            return "Respond only as " + activeSpeaker + ". Do not write " +
-                "dialogue, actions, or thoughts for any other character. " +
-                "Do not begin with a character name, USER, ASSISTANT, or " +
-                "SYSTEM label.";
+            return DialogueTurnPolicy.EmptyRetryCue(turnCue);
         }
 
         return "Provide only the requested answer now. Do not include a " +
             "USER, ASSISTANT, or SYSTEM label.";
     }
 
-    private static string GetActiveDialogSpeakerName()
+    private static string[] GetConversationNpcNames(NeuralNPC activeNpc)
     {
-        return NeuralNPC.currentActiveDialogNeuralNPC?
-            .GetFinalName()?.Trim() ?? "";
-    }
-
-    private static string JoinLinesAfterLeadingAction(string output)
-    {
-        if (!output.TrimStart().StartsWith("*"))
-            return output;
-
-        // NeuralNPC.Generate only retains the first output line. Xialong often
-        // places dialogue on the line after an opening *action*, so preserve it
-        // by making that action/dialogue response a single Silverpine line.
-        return output
-            .Replace("\r\n", " ")
-            .Replace('\r', ' ')
-            .Replace('\n', ' ');
-    }
-
-    private static string RestoreMissingLeadingActionMarker(
-        string output,
-        bool isDialog)
-    {
-        if (!isDialog || string.IsNullOrWhiteSpace(output))
-            return output;
-
-        int markerCount = output.Count(character => character == '*');
-        int firstMarker = output.IndexOf('*');
-        if (markerCount % 2 == 0 || firstMarker <= 0)
-            return output;
-
-        string beforeFirstMarker = output.Substring(0, firstMarker);
-        if (string.IsNullOrWhiteSpace(beforeFirstMarker))
-            return output;
-
-        Plugin.Log.LogWarning(
-            "NovelAI dialogue had an unmatched closing action marker; " +
-            "restored the missing leading asterisk.");
-
-        int contentStart = 0;
-        while (contentStart < output.Length &&
-               char.IsWhiteSpace(output[contentStart]))
-        {
-            contentStart++;
-        }
-        return output.Insert(contentStart, "*");
-    }
-
-    private static string StripLeadingDashSeparator(
-        string output,
-        bool isDialog)
-    {
-        if (!isDialog || string.IsNullOrEmpty(output))
-            return output;
-
-        int index = 0;
-        while (index < output.Length && char.IsWhiteSpace(output[index]))
-            index++;
-
-        int dashCount = 0;
-        int scan = index;
-        while (scan < output.Length)
-        {
-            char character = output[scan];
-            if (character == '-' || character == '\u2013' ||
-                character == '\u2014')
-            {
-                dashCount++;
-                scan++;
-                continue;
-            }
-            if (char.IsWhiteSpace(character))
-            {
-                scan++;
-                continue;
-            }
-            break;
-        }
-
-        if (dashCount < 1)
-            return output;
-
-        Plugin.Log.LogWarning(
-            "Removed a leading dash separator from NovelAI dialogue.");
-        return output.Substring(scan).TrimStart();
-    }
-
-    private static string StripLeadingEmptyActionSeparators(
-        string output,
-        bool isDialog)
-    {
-        if (!isDialog || string.IsNullOrEmpty(output))
-            return output;
-
-        string cleaned = Regex.Replace(
-            output,
-            @"(?m)(^|\n)([^\r\n:]{1,80}:(?:\*)?[ \t]*)?(?:\*\*(?:[ \t]+|$))+",
-            "$1$2");
-        if (cleaned != output)
-        {
-            Plugin.Log.LogWarning(
-                "Removed empty leading action markers from NovelAI dialogue.");
-        }
-        return cleaned;
-    }
-
-    private static string EncloseInitialNarrationPrefix(
-        string output,
-        bool isInitialUnpromptedDialog)
-    {
-        if (!isInitialUnpromptedDialog || string.IsNullOrWhiteSpace(output))
-            return output;
-
-        int firstMarker = output.IndexOf('*');
-        int markerCount = output.Count(character => character == '*');
-        if (firstMarker <= 0 || markerCount == 0 || markerCount % 2 != 0)
-            return output;
-
-        string prefix = output.Substring(0, firstMarker);
-        string narration = prefix.Trim();
-        if (narration.Length == 0)
-            return output;
-
-        Plugin.Log.LogWarning(
-            "NovelAI's initial NPC introduction began with unmarked " +
-            "narration; enclosed the leading segment in asterisks.");
-
-        string leadingWhitespace = prefix.Substring(
-            0,
-            prefix.Length - prefix.TrimStart().Length);
-        return leadingWhitespace + "*" + narration + "* " +
-               output.Substring(firstMarker).TrimStart();
-    }
-
-    private static bool IsFirstMeetingDialog(GenParams genParams)
-    {
-        return genParams.isDialog &&
-               (genParams.prompt ?? "").IndexOf(
-                   "first time meeting",
-                   StringComparison.OrdinalIgnoreCase) >= 0;
+        if (activeNpc == null) return Array.Empty<string>();
+        var names = new List<string> { activeNpc.GetFinalName() };
+        // A stale group from a different conversation must not introduce NPCs.
+        if (NeuralNPC.multiDialogParticipants != null &&
+            NeuralNPC.multiDialogParticipants.Contains(activeNpc))
+            names.AddRange(NeuralNPC.multiDialogParticipants
+                .Where(npc => npc != null).Select(npc => npc.GetFinalName()));
+        return names.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     private static bool IsConversationBroadcast(GenParams genParams)
@@ -1410,14 +1251,15 @@ internal static class NovelAIClient
     private static List<Message> BuildChatMessages(
         List<Message> messages,
         bool isDialog,
-        string grammar)
+        string grammar,
+        string turnCue)
     {
         var chatMessages = new List<Message>
         {
             new()
             {
                 role = "system",
-                content = BuildInstructionText(isDialog, grammar)
+                content = BuildInstructionText(isDialog, grammar, turnCue)
             }
         };
 
@@ -1432,29 +1274,27 @@ internal static class NovelAIClient
 
         if (isDialog)
         {
-            // Silverpine may finish a multi-dialog prompt with an explicit
-            // system turn marker such as "(Gareth's turn.)". Put the named
-            // ownership rule on the last system message so it remains next
-            // to that marker instead of being diluted by character history.
-            int lastSystemIndex = chatMessages.FindLastIndex(message =>
-                message.role == "system");
-            if (lastSystemIndex > 0)
+            // Silverpine embeds its turn cue in a user message, not necessarily
+            // a system message. Put the reminder at the actual generation point.
+            if (chatMessages[chatMessages.Count - 1].role == "user")
             {
-                chatMessages[lastSystemIndex].content +=
-                    "\n\n" + BuildActiveSpeakerInstruction();
+                chatMessages[chatMessages.Count - 1].content += "\n\n" + turnCue;
             }
+            else
+                chatMessages.Add(new Message { role = "user", content = turnCue });
         }
         return chatMessages;
     }
 
-    private static string BuildInstructionText(bool isDialog, string grammar)
+    private static string BuildInstructionText(
+        bool isDialog, string grammar, string turnCue)
     {
         var instructions = new StringBuilder(
             isDialog ? CompatibilityInstructions : UtilityInstructions);
         if (isDialog)
         {
             instructions.Append("\n\n");
-            instructions.Append(BuildActiveSpeakerInstruction());
+            instructions.Append(turnCue);
         }
         if (!isDialog && !string.IsNullOrWhiteSpace(grammar))
         {
@@ -1466,40 +1306,27 @@ internal static class NovelAIClient
         return instructions.ToString();
     }
 
-    private static string BuildActiveSpeakerInstruction()
-    {
-        string activeSpeaker = GetActiveDialogSpeakerName();
-        if (activeSpeaker.Length == 0)
-        {
-            return "Generate exactly one character's turn. Only the active " +
-                "NPC may speak, act, think, feel, decide, or react. Do not " +
-                "control the player or any other character.";
-        }
-
-        return "ACTIVE TURN OWNERSHIP: The one and only character you may " +
-            "write or control in this response is " + activeSpeaker + ". " +
-            "Every spoken word must belong to " + activeSpeaker + ", and " +
-            "every action, reaction, decision, feeling, and thought you " +
-            "invent must be " + activeSpeaker + "'s. The player and all " +
-            "other named characters are context only: do not make them " +
-            "speak, move, react, decide, feel, or think. Do not continue " +
-            "their side of the scene. Return only " + activeSpeaker + "'s " +
-            "single turn, without a speaker label.";
-    }
-
     private static string BuildCompletionPrompt(
         List<Message> messages,
         bool isDialog,
-        string grammar)
+        string grammar,
+        string turnCue)
     {
         var prompt = new StringBuilder();
         prompt.Append("SYSTEM:\n");
-        prompt.Append(BuildInstructionText(isDialog, grammar));
+        prompt.Append(BuildInstructionText(isDialog, grammar, turnCue));
         prompt.Append("\n\n");
 
         for (int index = 0; index < messages.Count; index++)
         {
             Message message = messages[index];
+            if (isDialog && index == messages.Count - 1 &&
+                message.role == "assistant")
+            {
+                prompt.Append("USER:\n");
+                prompt.Append(turnCue);
+                prompt.Append("\n\n");
+            }
             prompt.Append(message.role.ToUpperInvariant());
             prompt.Append(":\n");
             prompt.Append(message.content);
@@ -1518,6 +1345,12 @@ internal static class NovelAIClient
         if (messages.Count == 0 ||
             messages[messages.Count - 1].role != "assistant")
         {
+            if (isDialog)
+            {
+                prompt.Append("USER:\n");
+                prompt.Append(turnCue);
+                prompt.Append("\n\n");
+            }
             prompt.Append("ASSISTANT:\n");
         }
         return prompt.ToString();
@@ -1537,6 +1370,9 @@ internal static class NovelAIClient
                 continue;
 
             string content = SanitizeContent(message.content);
+            // Strip metadata from copies of old memories/dialogue used as
+            // context. Do not edit the user's existing save entries in place.
+            content = EmotionMetadata.Strip(content);
             if (message.role.ToString() == "assistant")
                 content = StripHistoricalDashSeparators(content);
             if (string.IsNullOrWhiteSpace(content))
